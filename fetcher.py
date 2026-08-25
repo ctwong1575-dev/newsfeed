@@ -1,19 +1,18 @@
 import feedparser
 import requests
+import datetime
 from typing import List, Dict
 from config import NEWS_FEEDS
 
 def fetch_daily_news(max_articles_per_source: int = 4) -> List[Dict[str, str]]:
     all_articles = []
     
-    # 模擬瀏覽器 Header，防止伺服器回傳快取或阻擋
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
 
     for source_name, url in NEWS_FEEDS.items():
         try:
-            # 先使用 requests 取得最新的 XML 內容
             response = requests.get(url, headers=headers, timeout=10)
             if response.status_code == 200:
                 feed = feedparser.parse(response.content)
@@ -25,7 +24,7 @@ def fetch_daily_news(max_articles_per_source: int = 4) -> List[Dict[str, str]]:
                     title = entry.get("title", "").strip()
                     summary = entry.get("summary", entry.get("description", "")).strip()
                     link = entry.get("link", "").strip()
-                    published = entry.get("published", entry.get("updated", ""))
+                    published = entry.get("published", entry.get("updated", entry.get("pubDate", "")))
 
                     if title:
                         all_articles.append({
