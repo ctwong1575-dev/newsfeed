@@ -1,10 +1,11 @@
 from typing import List, Dict
-from google import genai
-from config import GEMINI_API_KEY
-
-client = genai.Client(api_key=GEMINI_API_KEY)
+from openai import OpenAI
+import os
 
 def generate_investment_insights(articles: List[Dict[str, str]]) -> str:
+    api_key = os.getenv("OPENAI_API_KEY", "")
+    client = OpenAI(api_key=api_key)
+
     news_text = ""
     for idx, art in enumerate(articles, 1):
         news_text += f"[{idx}] {art['source']} | 標題: {art['title']}\n摘要: {art['summary']}\n\n"
@@ -35,10 +36,13 @@ def generate_investment_insights(articles: List[Dict[str, str]]) -> str:
 """
 
     try:
-        response = client.models.generate_content(
-            model='gemini-1.5-flash',
-            contents=prompt,
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.7
         )
-        return response.text
+        return response.choices[0].message.content
     except Exception as e:
-        return f"Gemini API 分析生成失敗: {e}"
+        return f"OpenAI API 分析生成失敗: {e}"
