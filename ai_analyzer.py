@@ -2,6 +2,7 @@ from typing import List, Dict
 from google import genai
 import os
 import datetime
+import time
 
 def generate_investment_insights(articles: List[Dict[str, str]]) -> str:
     api_key = os.getenv("GEMINI_API_KEY")
@@ -9,8 +10,6 @@ def generate_investment_insights(articles: List[Dict[str, str]]) -> str:
         raise ValueError("環境變數 GEMINI_API_KEY 未設定，請檢查 GitHub Secrets。")
 
     client = genai.Client(api_key=api_key)
-
-    # 取得當前真實日期
     today_str = datetime.date.today().strftime("%Y年%m月%d日")
 
     news_text = ""
@@ -34,8 +33,8 @@ def generate_investment_insights(articles: List[Dict[str, str]]) -> str:
    - 必須涵蓋但不限於：**美股 (US Stocks)**、**港股 (HK Stocks)**、**黃金 (Gold)**。
    - 每個建議必須明確包含：
      - **股票/資產名稱與代號 (Ticker)**
-     - **操作方向**（看漲/突破買入/逢低吸納/沽空/賣出等）
-     - **建議買入/沽空價區間**
+     - **操作方向**（看漲/突破買入/逢低吸納等）
+     - **建議買入價區間**
      - **止蝕價 (Stop-loss)** 與 **目標價 (Target Price)**
      - **數據與邏輯支持**（引用新聞數據）
 3. **新聞來源與參考連結**：
@@ -50,11 +49,25 @@ def generate_investment_insights(articles: List[Dict[str, str]]) -> str:
 - 使用適合 Telegram 閱讀的 Markdown 格式，適當加入 Emoji。
 """
 
-    try:
-        response = client.models.generate_content(
-            model='gemini-3.6-flash',
-            contents=prompt,
-        )
-        return response.text
-    except Exception as e:
-        return f"Gemini API 分析生成失敗: {e}"
+    # 備援模型清單：優先使用 flash 次之使用其他可用模型
+    models_to_try = ['gemini-2.5-flash', 'gemini-1.5-flash']
+
+    for model_name in models_to_try:
+        # 每個模型嘗試重試最多 3 次
+        for attempt in range(1, 4):
+            try:
+                print(f"🔄 嘗試使用模型 {model_name} (第 {attempt} 次嘗試)...")
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                )
+                if response.text:
+                    return response.text
+            except Exception as e:
+                print(f"⚠️ 模型 {model_name} 第 {attempt} 次呼叫失敗: {e}")
+                if "503" in str(e) or "UNAVAILABLE" in str(e):
+                    time.sleep(5 * attempt)  # 遇 503 暫停 5、10 秒後重試
+                else:
+                    break  # 若非 503 伺服器過載問題，直接切換下一個模型
+
+    return "❌ Gemini API 分析生成失敗：所有備援模型與重試均告超時或繁忙，請稍後於 GitHub Actions 手動重試。"
