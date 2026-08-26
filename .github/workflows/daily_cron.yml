@@ -3,7 +3,7 @@ name: Daily Financial News Telegram Bot
 on:
   schedule:
     # 00:00 UTC 等於 香港時間 (HKT / UTC+8) 08:00 AM
-    - cron: '0 0 * * *'
+    - cron: '42 23 * * *'
   workflow_dispatch:
 
 jobs:
