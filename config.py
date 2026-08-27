@@ -13,3 +13,19 @@ NEWS_FEEDS = {
     "BBC Business": "http://feeds.bbci.co.uk/news/business/rss.xml",
     "Sky News Business": "https://feeds.skynews.com/feeds/rss/business.rss"
 }
+
+# ==========================================
+# SEC 股權異動監控配置 (SEC Edgar Monitor)
+# ==========================================
+SEC_HEADERS = {
+    "User-Agent": "MarketIntelligenceBot/2.0 (contact@marketresearch.com)",
+    "Accept-Encoding": "gzip, deflate"
+}
+
+SEC_FEED_URL = (
+    "https://www.sec.gov/cgi-bin/browse-edgar?"
+    "action=getcurrent&type=&company=&dateb=&owner=include&count=40&output=atom"
+)
+
+MIN_TRANSACTION_VALUE = 50000.0   # Form 4 最小總交易額門檻 (美元)
+POLL_INTERVAL_SECONDS = 20       # 輪詢間隔 (秒)
