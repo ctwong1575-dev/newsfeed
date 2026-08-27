@@ -1,10 +1,13 @@
 import argparse
 import os
 import time
+import re
 import xml.etree.ElementTree as ET
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util import Retry
 
-# 讀取設定
+# 讀取配置
 try:
     import config
     TELEGRAM_BOT_TOKEN = getattr(config, "TELEGRAM_BOT_TOKEN", os.getenv("TELEGRAM_BOT_TOKEN", ""))
@@ -13,9 +16,8 @@ try:
         "User-Agent": "MarketIntelligenceBot/2.0 (research@marketresearch.com)",
         "Accept-Encoding": "gzip, deflate"
     })
-    MIN_BUY_VALUE = getattr(config, "MIN_BUY_VALUE", 50000.0)
-    MIN_SELL_VALUE = getattr(config, "MIN_SELL_VALUE", 500000.0)
-    POLL_INTERVAL_SECONDS = getattr(config, "POLL_INTERVAL_SECONDS", 20)
+    MIN_BUY_VALUE = getattr(config, "MIN_BUY_VALUE", 50000.0)      # 內部人買入門檻 ($50K)
+    MIN_SELL_VALUE = getattr(config, "MIN_SELL_VALUE", 500000.0)  # 內部人賣出門檻 ($500K)
 except ImportError:
     TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
     TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
@@ -25,17 +27,22 @@ except ImportError:
     }
     MIN_BUY_VALUE = 50000.0
     MIN_SELL_VALUE = 500000.0
-    POLL_INTERVAL_SECONDS = 20
 
-# SEC 官方最新申報 JSON API (最即時且結構完整)
-SEC_SUBMISSIONS_URL = "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=&company=&dateb=&owner=include&count=80&output=atom"
+SEC_FEED_URL = (
+    "https://www.sec.gov/cgi-bin/browse-edgar?"
+    "action=getcurrent&type=&company=&dateb=&owner=include&count=80&output=atom"
+)
 
-seen_filings = set()
+# 建立具備自動重試機制的持久化 Session
+session = requests.Session()
+retries = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
+session.mount('https://', HTTPAdapter(max_retries=retries))
+session.headers.update(SEC_HEADERS)
 
 def send_telegram(text: str):
-    """發送 Telegram Markdown 卡片"""
+    """發送 Markdown 格式訊息至 Telegram"""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("\n[⚠️ Telegram 未配置，僅輸出 Console]:\n" + text)
+        print("\n[Console Log]\n" + text + "\n" + "="*50)
         return
     
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -46,7 +53,7 @@ def send_telegram(text: str):
         "disable_web_page_preview": True
     }
     try:
-        resp = requests.post(url, json=payload, timeout=10)
+        resp = session.post(url, json=payload, timeout=15)
         if resp.status_code == 200:
             print("  └─ 🚀 [Telegram 推送成功]")
         else:
@@ -54,18 +61,17 @@ def send_telegram(text: str):
     except Exception as e:
         print(f"  └─ ❌ [Telegram 連線異常]: {e}")
 
-def parse_form4_from_text_or_xml(doc_url: str, ignore_threshold=False):
-    """解析 Form 4 (支援 .xml 或 .txt 原始文件)"""
-    time.sleep(0.15)  # 避免觸發 SEC 每秒 10 次限制
+def parse_form4_details(doc_url: str, ignore_threshold: bool = False):
+    """下載並深度解析 Form 4，提取股票代號、高管、買賣金額與 10b5-1 計劃"""
+    time.sleep(0.15)  # SEC 頻率保護
     try:
-        resp = requests.get(doc_url, headers=SEC_HEADERS, timeout=8)
+        resp = session.get(doc_url, timeout=15)
         if resp.status_code != 200:
             return None
 
         content = resp.text
-        # 若是 HTML 目錄頁，尋找主 XML 檔案鏈接
+        # 若為 HTML 索引頁，自動定位具體的 xml 檔案
         if "<ownershipDocument>" not in content:
-            import re
             base_dir = doc_url.rsplit('/', 1)[0]
             xml_files = re.findall(r'href="([^"]+)"', content)
             xml_target = None
@@ -75,26 +81,24 @@ def parse_form4_from_text_or_xml(doc_url: str, ignore_threshold=False):
                     break
             if xml_target:
                 time.sleep(0.15)
-                resp = requests.get(xml_target, headers=SEC_HEADERS, timeout=8)
+                resp = session.get(xml_target, timeout=15)
                 content = resp.text
             else:
                 return None
 
-        # 提取 XML 片段
-        if "<ownershipDocument>" in content:
-            xml_start = content.find("<ownershipDocument>")
-            xml_end = content.find("</ownershipDocument>") + len("</ownershipDocument>")
-            xml_data = content[xml_start:xml_end]
-            root = ET.fromstring(xml_data)
-        else:
+        if "<ownershipDocument>" not in content:
             return None
 
-        # 1. 股票與公司
+        xml_start = content.find("<ownershipDocument>")
+        xml_end = content.find("</ownershipDocument>") + len("</ownershipDocument>")
+        root = ET.fromstring(content[xml_start:xml_end])
+
+        # 1. 公司與股票代號
         issuer = root.find("issuer")
         ticker = issuer.findtext("issuerTradingSymbol", default="UNKNOWN").upper() if issuer is not None else "UNKNOWN"
         company_name = issuer.findtext("issuerName", default="").strip() if issuer is not None else ""
 
-        # 2. 內部人身份
+        # 2. 內部人與職位
         rpt_owner = root.find("reportingOwner")
         owner_name = "內部人士"
         roles = []
@@ -106,15 +110,15 @@ def parse_form4_from_text_or_xml(doc_url: str, ignore_threshold=False):
             if rel is not None:
                 if rel.findtext("isDirector") in ["1", "true"]: roles.append("董事")
                 if rel.findtext("isOfficer") in ["1", "true"]:
-                    title = rel.findtext("officerTitle", default="高管")
-                    roles.append(title if title else "高管")
+                    t = rel.findtext("officerTitle", default="高管")
+                    roles.append(t if t else "高管")
                 if rel.findtext("isTenPercentOwner") in ["1", "true"]: roles.append("10%+大股東")
         role_desc = "/".join(roles) if roles else "內部人"
 
         # 3. 10b5-1 計劃
         is_10b51 = root.findtext("affirmative10b5OneFlag", default="0") in ["1", "true"]
 
-        # 4. 統計買賣
+        # 4. 統計交易
         total_p_val, total_p_shares = 0.0, 0
         total_s_val, total_s_shares = 0.0, 0
         total_other_val, total_other_shares = 0.0, 0
@@ -125,6 +129,7 @@ def parse_form4_from_text_or_xml(doc_url: str, ignore_threshold=False):
             shares_txt = trans.findtext(".//transactionAmounts/transactionShares/value", default="0")
             price_txt = trans.findtext(".//transactionAmounts/transactionPricePerShare/value", default="0")
             post_txt = trans.findtext(".//postTransactionAmounts/sharesOwnedFollowingTransaction/value", default="")
+            
             if post_txt:
                 try: latest_shares = f"{float(post_txt):,.0f}"
                 except ValueError: latest_shares = post_txt
@@ -146,7 +151,7 @@ def parse_form4_from_text_or_xml(doc_url: str, ignore_threshold=False):
                 total_other_shares += int(s)
                 total_other_val += val
 
-        # 測試模式：即使沒有 P/S 或金額小，也推送出來驗證
+        # 測試模式判斷
         if ignore_threshold:
             trans_type = "BUY" if total_p_val >= total_s_val else "SELL"
             val = total_p_val if trans_type == "BUY" else total_s_val
@@ -161,7 +166,7 @@ def parse_form4_from_text_or_xml(doc_url: str, ignore_threshold=False):
                 "post_shares": latest_shares, "is_10b51": is_10b51, "code": "P" if trans_type == "BUY" else "S"
             }
 
-        # 正常門檻過濾
+        # 門檻過濾
         if total_p_val >= MIN_BUY_VALUE:
             avg_p = total_p_val / total_p_shares if total_p_shares > 0 else 0
             return {
@@ -182,13 +187,14 @@ def parse_form4_from_text_or_xml(doc_url: str, ignore_threshold=False):
         print(f"  └─ ℹ️ [未達門檻] {ticker} | {owner_name} | 買入: ${total_p_val:,.0f} | 賣出: ${total_s_val:,.0f}")
         return None
     except Exception as e:
+        print(f"  └─ ⚠️ 解析單筆 Form 4 異常: {e}")
         return None
 
-def process_feed(test_mode=False):
-    """掃描最新 SEC Feed"""
+def run_once(test_mode: bool = False):
+    """執行單次掃描並推送"""
     print(f"[{time.strftime('%H:%M:%S')}] 📡 正在請求 SEC 最新申報...")
     try:
-        resp = requests.get(SEC_SUBMISSIONS_URL, headers=SEC_HEADERS, timeout=10)
+        resp = session.get(SEC_FEED_URL, timeout=20)
         if resp.status_code != 200:
             print(f"[❌ SEC 請求異常 HTTP {resp.status_code}]")
             return
@@ -196,24 +202,19 @@ def process_feed(test_mode=False):
         root = ET.fromstring(resp.content)
         ns = {'atom': 'http://www.w3.org/2005/Atom'}
         entries = root.findall('atom:entry', ns)
-        print(f"[{time.strftime('%H:%M:%S')}] 成功獲取 {len(entries)} 筆申報，開始掃描重要異動...")
+        print(f"[{time.strftime('%H:%M:%S')}] 成功獲取 {len(entries)} 筆最新申報，開始掃描重大異動...")
 
+        processed_count = 0
         for entry in entries:
             title = entry.find('atom:title', ns).text or ""
             link = entry.find('atom:link', ns).attrib.get('href', "")
-            doc_id = link.split('/')[-1]
-
-            if not test_mode and doc_id in seen_filings:
-                continue
-
-            seen_filings.add(doc_id)
             full_link = link if link.startswith("http") else f"https://www.sec.gov{link}"
             curr_time = time.strftime('%H:%M:%S')
 
-            # Form 4 處理
+            # 1. 處理 Form 4
             if "4 - " in title or "4/A - " in title:
                 print(f"🔍 正在解析 Form 4: {title[:50]}...")
-                data = parse_form4_from_text_or_xml(full_link, ignore_threshold=test_mode)
+                data = parse_form4_details(full_link, ignore_threshold=test_mode)
 
                 if data:
                     is_buy = data["type"] == "BUY"
@@ -235,11 +236,12 @@ def process_feed(test_mode=False):
                         f"• 📄 [點此開啟 SEC 官方原檔]({full_link})"
                     )
                     send_telegram(msg)
+                    processed_count += 1
                     if test_mode:
-                        print("✅ 測試成功：已發送第一筆解析成功的申報至 Telegram！")
+                        print("✅ 測試成功：已發送第一筆申報樣板至 Telegram。")
                         return
 
-            # 13D 處理
+            # 2. 處理 Schedule 13D
             elif "SC 13D" in title:
                 print(f"🔥 發現 13D 大股東申報: {title}...")
                 company = title.split(" - ")[1] if " - " in title else title
@@ -255,29 +257,18 @@ def process_feed(test_mode=False):
                     f"• 📄 [點此開啟 SEC 13D 原檔]({full_link})"
                 )
                 send_telegram(msg)
+                processed_count += 1
                 if test_mode:
                     return
 
-    except Exception as e:
-        print(f"[❌ 輪詢出錯]: {e}")
+        print(f"[{time.strftime('%H:%M:%S')}] ✅ 掃描完成，共推送 {processed_count} 筆重大申報。")
 
-def main():
-    parser = argparse.ArgumentParser(description="SEC Edgar Premarket Monitor")
-    parser.add_argument("--duration", type=int, default=180, help="運行時長 (分鐘)")
+    except Exception as e:
+        print(f"[❌ 執行出錯]: {e}")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="SEC Edgar One-shot Monitor")
     parser.add_argument("--test", action="store_true", help="測試模式：忽略門檻，立即發送最新 1 筆")
     args = parser.parse_args()
 
-    if args.test:
-        print("🧪 啟動【測試模式】：忽略金額門檻，立即發送最新 1 筆申報...")
-        process_feed(test_mode=True)
-        return
-
-    print(f"🚀 啟動美股重大股權異動監控 (買入門檻: ${MIN_BUY_VALUE:,.0f}, 賣出門檻: ${MIN_SELL_VALUE:,.0f})...")
-    end_time = time.time() + (args.duration * 60)
-    while time.time() < end_time:
-        process_feed(test_mode=False)
-        print(f"⏳ 等待 {POLL_INTERVAL_SECONDS} 秒後進行下一次檢查...")
-        time.sleep(POLL_INTERVAL_SECONDS)
-
-if __name__ == "__main__":
-    main()
+    run_once(test_mode=args.test)
