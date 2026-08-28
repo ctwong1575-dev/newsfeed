@@ -1,10 +1,35 @@
-name: US Premarket SEC Monitor
+name: SEC Insider Monitor (Hourly)
 
 on:
   schedule:
-    # 美東 06:00 / 香港 18:00 (夏令時間 UTC 10:00，週一至週五)
-    - cron: '0 10 * * 1-5'
-  workflow_dispatch: # 支援在 GitHub 網頁上手動單次觸發
+    # 週一至週五 (1-5)，每 60 分鐘 (每小時整點 0 分) 執行一次
+    - cron: '0 * * * 1-5'
+  workflow_dispatch: # 保留手動立即觸發按鈕
+
+jobs:
+  scan-sec-filings:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: |
+          pip install requests
+
+      - name: Run SEC Insider Scanner
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python sec_insider_monitor.py
 
 jobs:
   run-sec-monitor:
