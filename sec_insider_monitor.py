@@ -44,22 +44,18 @@ def send_telegram(text: str):
         return False
 
 def get_xml_content(index_url: str):
-    """精準提取 Form 4 的 XML 原生內容"""
+    """使用純文字 Regex 提取 Form 4 的 XML 原生內容，避免 HTML 解析崩潰"""
     try:
-        # 將 -index.htm 替換為資料夾基礎路徑
-        base_dir = index_url.rsplit('/', 1)[0]
-        acc_num = index_url.split('/')[-1].replace('-index.htm', '').replace('-index.html', '')
-        
-        # 優先嘗試標準命名: {acc_num}.txt 或直接獲取目錄檔案
         r = requests.get(index_url, headers=SEC_HEADERS, timeout=10)
         if r.status_code != 200:
             return None
         
-        # 提取 XML 文件路徑 (排除 .xsd schema 檔)
-        xml_matches = re.findall(r'href="(/Archives/edgar/data/[^"]+\.xml)"', r.text)
+        # 尋找所有 .xml 結尾的文件 (排除 .xsd schema 檔)
+        xml_matches = re.findall(r'href="(/Archives/edgar/data/[^"]+\.xml)"', r.text, re.IGNORECASE)
         target_xml = None
+        
         for path in xml_matches:
-            if not path.endswith(".xsd"):
+            if not path.lower().endswith(".xsd"):
                 target_xml = f"https://www.sec.gov{path}"
                 break
                 
@@ -73,12 +69,13 @@ def get_xml_content(index_url: str):
     return None
 
 def parse_and_alert(title: str, link: str, force_test: bool = False):
-    """解析 Form 4 並判斷買賣訊號"""
+    """解析 Form 4 XML 文件並發送警報"""
     xml_content = get_xml_content(link)
     if not xml_content:
         return False
 
     try:
+        # 只對純 XML 文件內容進行 XML 解析
         root = ET.fromstring(xml_content)
 
         ticker_elem = root.find(".//issuerTradingSymbol")
@@ -97,19 +94,16 @@ def parse_and_alert(title: str, link: str, force_test: bool = False):
 
         transactions = root.findall(".//nonDerivativeTransaction")
         
-        # 如果是強制測試模式，即使是非常規交易也構造一筆推播以測試管線
+        # 強制測試模式：確保第一筆有效資料能推送到 Telegram 驗證連線
         if force_test:
             code = "P"
-            acq_disp = "A"
             shares = 1000
             price = 150.0
             total_usd = 150000.0
-            is_10b5 = False
             
             if transactions:
                 t0 = transactions[0]
                 code = t0.find(".//transactionCode").text if t0.find(".//transactionCode") is not None else "P"
-                acq_disp = t0.find(".//transactionAcquiredDisposedCode/value").text if t0.find(".//transactionAcquiredDisposedCode/value") is not None else "A"
                 try:
                     shares = float(t0.find(".//transactionShares/value").text or 1000)
                     price = float(t0.find(".//transactionPricePerShare/value").text or 100)
@@ -168,7 +162,7 @@ def parse_and_alert(title: str, link: str, force_test: bool = False):
                 return True
 
     except Exception as e:
-        print(f"⚠️ [解析報錯]: {e}")
+        print(f"⚠️ [XML 解析錯誤]: {e}")
 
     return False
 
